@@ -31,7 +31,7 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 CDP_PORT = int(os.environ.get("WB_CDP_PORT", "9223"))
-PROFILE_COPY = Path(os.environ.get("WB_PROFILE_COPY", "/Users/alex/.marketplace-mcp/chrome_profile"))
+PROFILE_COPY = Path(os.environ.get("WB_PROFILE_COPY") or os.path.expanduser("~/.marketplace-mcp/chrome_profile"))
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 LAUNCHER = Path(__file__).resolve().parent / "wb_chrome.sh"
 

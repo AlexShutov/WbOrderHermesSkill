@@ -5,7 +5,7 @@
 #   wb_chrome.sh --show     -> visible window (for manual ПВЗ choice)
 set -u
 PORT=${WB_CDP_PORT:-9223}
-PROFILE=${WB_PROFILE_COPY:-/Users/alex/.marketplace-mcp/chrome_profile}
+PROFILE=${WB_PROFILE_COPY:-$HOME/.marketplace-mcp/chrome_profile}
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 if curl -s --max-time 3 "http://127.0.0.1:${PORT}/json/version" | grep -q Browser; then
