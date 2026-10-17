@@ -1,0 +1,179 @@
+diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
+index 888d40e2..402e149b 100644
+--- a/gateway/run_inbound.py
++++ b/gateway/run_inbound.py
+@@ -1307,6 +1307,11 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
+             return _paused_notice
+ 
+         _quick_key = self._session_key_for_source(source)
++        # Origin for the origin-aware clarify timeout (tools.clarify_gateway): the inbound kind of the
++        # message that raised the question decides whether the voice-style auto-cancel applies
++        # (voice -> clarify.voice_timeout, default 180s; text -> the configured window).
++        from tools import clarify_gateway as _clarify_mod
++        _clarify_mod.record_inbound_kind(_quick_key, event.message_type.value)
+         _reply = await self._hm_pending_reply_intercepts(event, source, _quick_key)
+         if _reply is not None:
+             return _reply
+diff --git a/gateway/run_turn_runner_clarify_delivery.py b/gateway/run_turn_runner_clarify_delivery.py
+index e3bd3f4f..ce3c9813 100644
+--- a/gateway/run_turn_runner_clarify_delivery.py
++++ b/gateway/run_turn_runner_clarify_delivery.py
+@@ -105,7 +105,9 @@ def _clarify_send_then_wait(fut, *, clarify_id: str, session_key: str, clarify_m
+         return abort, False
+     late = _LateFailureWatch(fut, clarify_id=clarify_id, session_key=session_key,
+                              clarify_mod=clarify_mod, fallback=fallback)
+-    timeout = clarify_mod.get_clarify_timeout()
++    # Origin-aware: a voice-origin question uses clarify.voice_timeout (see clarify_gateway),
++    # so an order flow the user left mid-choice falls to "cancel" in minutes, not an hour.
++    timeout = clarify_mod.get_clarify_timeout(session_key=session_key)
+     response = clarify_mod.wait_for_response(clarify_id, timeout=float(timeout))
+     late.disarm()
+     if late.undeliverable:
+diff --git a/hermes_cli/config.py b/hermes_cli/config.py
+index ca35d36c..12503a79 100644
+--- a/hermes_cli/config.py
++++ b/hermes_cli/config.py
+@@ -960,6 +960,10 @@ _EXTRA_KNOWN_ROOT_KEYS = {
+     "multiplex_profiles", "profile_routes", "platforms", "require_mention",
+     "unauthorized_dm_behavior", "signal", "allow_all_users",
+     "timeouts",          # unified timeout resolution section (agent/deadline.py)
++    # Read by tools/clarify_gateway.py (resolve_clarify_timeout): `timeout` (legacy form that
++    # wins when explicitly set) and `voice_timeout` — the origin-aware window for a question
++    # raised from a voice message (voice-origin order flows auto-cancel in minutes).
++    "clarify",
+ }
+ _KNOWN_ROOT_KEYS = frozenset(DEFAULT_CONFIG.keys()) | _EXTRA_KNOWN_ROOT_KEYS
+ 
+diff --git a/tests/agent/test_sequential_tool_timeout.py b/tests/agent/test_sequential_tool_timeout.py
+index dbd2ef70..5f12b3ec 100644
+--- a/tests/agent/test_sequential_tool_timeout.py
++++ b/tests/agent/test_sequential_tool_timeout.py
+@@ -306,7 +306,7 @@ def test_sequential_timeout_does_not_cut_clarify_human_wait(
+     monkeypatch.setenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "1.0")
+     monkeypatch.setattr(
+         "tools.clarify_gateway.get_clarify_timeout",
+-        lambda: clarify_timeout,
++        lambda *a, **k: clarify_timeout,
+     )
+ 
+     def _callback(questions):
+diff --git a/tests/gateway/test_clarify_delivery_fallback.py b/tests/gateway/test_clarify_delivery_fallback.py
+index 0e181626..28ebd7c2 100644
+--- a/tests/gateway/test_clarify_delivery_fallback.py
++++ b/tests/gateway/test_clarify_delivery_fallback.py
+@@ -78,7 +78,9 @@ def _runner(adapter, loop, monkeypatch, timeout=5):
+         _status_adapter=adapter, _status_chat_id="42", _status_thread_metadata=None,
+         session_key="sk-fallback", stream_consumer_holder=[None], _loop_for_step=loop)
+     runner._close_native_stream_boundary = lambda *a, **k: None
+-    monkeypatch.setattr(cm, "get_clarify_timeout", lambda: timeout)
++    # Kwargs-tolerant: the delivery path now asks for the origin-aware timeout
++    # (get_clarify_timeout(session_key=...)).
++    monkeypatch.setattr(cm, "get_clarify_timeout", lambda *a, **k: timeout)
+     return runner
+ 
+ 
+diff --git a/tests/gateway/test_clarify_voice_origin_timeout.py b/tests/gateway/test_clarify_voice_origin_timeout.py
+new file mode 100644
+index 00000000..2a870a92
+--- /dev/null
++++ b/tests/gateway/test_clarify_voice_origin_timeout.py
+@@ -0,0 +1,31 @@
++"""Origin-aware clarify timeout: a voice-origin question auto-cancels in minutes,
++a text-origin question keeps the configured window. The order flow reads the voice
++timeout as the user's "cancel" choice (see the marketplace-order-flow skill)."""
++
++from tools import clarify_gateway as cm
++
++
++CFG = {"clarify": {"timeout": 3600, "voice_timeout": 180}}
++
++
++def test_voice_origin_uses_voice_timeout_and_text_keeps_window():
++    assert cm.resolve_clarify_timeout(CFG, "voice") == 180
++    assert cm.resolve_clarify_timeout(CFG, "text") == 3600
++    assert cm.resolve_clarify_timeout(CFG) == 3600  # no origin recorded
++
++
++def test_session_origin_lookup_and_legacy_no_arg_call():
++    cm.record_inbound_kind("sk-voice", "voice")
++    cm.record_inbound_kind("sk-text", "text")
++    assert cm.get_inbound_kind("sk-voice") == "voice"
++    # The origin lookup must not break callers that pass no session key.
++    assert cm.get_clarify_timeout() == 3600
++    # Unknown session -> the configured window, not the voice one.
++    assert cm.get_clarify_timeout("sk-unknown") == 3600
++
++
++def test_voice_timeout_falls_back_when_unset_or_non_numeric():
++    assert cm.resolve_clarify_timeout({"clarify": {"timeout": 600}}, "voice") == 180
++    assert cm.resolve_clarify_timeout({"clarify": {"voice_timeout": "x", "timeout": 600}}, "voice") == 180
++    # An explicit 0 stays verbatim (unlimited) for text origin.
++    assert cm.resolve_clarify_timeout({"clarify": {"timeout": 0}}, "text") == 0
+diff --git a/tools/clarify_gateway.py b/tools/clarify_gateway.py
+index c97a4431..d69271e8 100644
+--- a/tools/clarify_gateway.py
++++ b/tools/clarify_gateway.py
+@@ -260,10 +260,41 @@ def clear_session(session_key: str) -> int:
+     return cancelled
+ 
+ 
+-def resolve_clarify_timeout(config: dict) -> int:
++# Origin-aware clarify timeout. A question raised from a VOICE message expires after
++# ``clarify.voice_timeout`` (default 180s): a user who sent a voice note and went quiet is
++# busy and has most likely decided not to buy, so the pending order flow must not sit armed
++# for an hour — the timeout is read as the user's "cancel" choice by the flow that asked.
++# A TEXT-origin question keeps the configured window (no voice-style auto-cancel).
++# Recorded per session at inbound dispatch; the next inbound message overwrites it, so it always
++# describes the message that raised the current question (a button click is not an inbound message).
++_session_kind: dict[str, str] = {}
++
++
++def record_inbound_kind(session_key: str, kind: str) -> None:
++    """Remember the inbound message kind ("voice"/"text") for a session's clarify timeout."""
++    if session_key:
++        _session_kind[session_key] = str(kind or "")
++
++
++def get_inbound_kind(session_key: str) -> str:
++    return _session_kind.get(session_key or "", "")
++
++
++def _voice_timeout(config: dict) -> int:
++    raw = (config.get("clarify") or {}).get("voice_timeout", 180)
++    try:
++        return int(raw)
++    except (TypeError, ValueError):
++        return 180
++
++
++def resolve_clarify_timeout(config: dict, kind: str = "") -> int:
+     """Clarify timeout (seconds): legacy ``clarify.timeout`` if explicitly set, else
+     ``agent.clarify_timeout``, else 3600 — the single source of truth for every surface
+-    (gateway, CLI, TUI). ``<= 0`` is kept verbatim (unlimited); non-numeric -> 3600."""
++    (gateway, CLI, TUI). ``<= 0`` is kept verbatim (unlimited); non-numeric -> 3600.
++    A ``voice`` origin uses ``clarify.voice_timeout`` instead (see above)."""
++    if kind == "voice":
++        return _voice_timeout(config)
+     raw = (config.get("clarify") or {}).get("timeout")
+     if raw is None:
+         raw = (config.get("agent") or {}).get("clarify_timeout", 3600)
+@@ -273,16 +304,17 @@ def resolve_clarify_timeout(config: dict) -> int:
+         return 3600
+ 
+ 
+-def get_clarify_timeout() -> int:
++def get_clarify_timeout(session_key: str = "") -> int:
+     """Clarify timeout from config.yaml; 0/negative = unlimited. Default 3600: long enough
+     that a user who stepped away still finds a live entry when they tap, short enough that
+     an abandoned prompt eventually unblocks the agent thread instead of pinning the guard.
+ 
+     The old 600s default evicted the entry mid-think, so a late tap landed on a dead entry and the agent
+     hung on ``running: clarify`` (#32762).
++    With a ``session_key``, a voice-origin session gets ``clarify.voice_timeout`` instead.
+     """
+     try:
+         from hermes_cli.config import load_config
+-        return resolve_clarify_timeout(load_config() or {})
++        return resolve_clarify_timeout(load_config() or {}, get_inbound_kind(session_key))
+     except Exception:
+         return 3600

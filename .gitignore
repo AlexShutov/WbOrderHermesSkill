@@ -1,0 +1,9 @@
+# Local MCP server project (344 MB with its venv) — machine-specific, not part of the skill
+ru-marketplace-mcp/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local state
+*.log
