@@ -30,7 +30,7 @@ hermes skills list                                                # провер
 ```
 
 Требования: macOS, Google Chrome, настроенный Telegram в Hermes (токен в `~/.hermes/.env`),
-для поиска — MCP-сервер marketplace: `git clone https://github.com/AlexShutov/ru-marketplace-mcp`
+для поиска — MCP-сервер marketplace: `git clone https://github.com/AlexShutov/ru-marketplace-mcp-wixed-wb-purchase`
 (форк с internal-tier доработкой; опционально, заказ по nmId работает и без него).
 
 Первый вход в Wildberries — вручную: `bash scripts/wb_chrome.sh --show`, залогиниться,
