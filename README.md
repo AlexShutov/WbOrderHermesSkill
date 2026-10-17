@@ -30,8 +30,25 @@ hermes skills list                                                # провер
 ```
 
 Требования: macOS, Google Chrome, настроенный Telegram в Hermes (токен в `~/.hermes/.env`),
-для поиска — MCP-сервер marketplace: `git clone https://github.com/AlexShutov/ru-marketplace-mcp-wixed-wb-purchase`
-(форк с internal-tier доработкой; опционально, заказ по nmId работает и без него).
+для поиска — MCP-сервер marketplace (опционально; заказ по nmId работает и без него):
+
+```bash
+git clone https://github.com/AlexShutov/ru-marketplace-mcp-wixed-wb-purchase \
+  ~/.hermes/skills/marketplace-order-flow/ru-marketplace-mcp   # форк с internal-tier доработкой
+cd ~/.hermes/skills/marketplace-order-flow/ru-marketplace-mcp && uv sync --all-packages
+```
+
+и в `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  marketplace:
+    command: uv
+    args: ["run", "--directory", "$HOME/.hermes/skills/marketplace-order-flow/ru-marketplace-mcp", "marketplace-mcp"]
+    enabled: true
+```
+
+(подставь абсолютный путь — Hermes не раскрывает `$HOME` в args; `uv` должен быть установлен).
 
 Первый вход в Wildberries — вручную: `bash scripts/wb_chrome.sh --show`, залогиниться,
 сказать агенту «готово». Профиль сохраняется в `~/.marketplace-mcp/chrome_profile`.

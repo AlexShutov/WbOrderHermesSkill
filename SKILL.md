@@ -132,7 +132,7 @@ it for page-level navigator.userAgent) — don't retry that route.
 
 `scripts/wb_send_text.py <chat_id> <text-file>` — sends the candidate-list message through the Bot API BEFORE the clarify dialog (the agent's own chat text only lands when the turn ends, i.e. after the blocking clarify — too late). Markdown first, plain-text fallback.
 
-`scripts/wb_order.py` (run with the MCP venv python, which has playwright — the project lives in this skill's directory: `~/.hermes/skills/marketplace-order-flow/ru-marketplace-mcp`, and `mcp_servers.marketplace.args` points there):
+`scripts/wb_order.py` (run with the MCP venv python, which has playwright — the MCP project is cloned into this skill's directory: `~/.hermes/skills/marketplace-order-flow/ru-marketplace-mcp` (see README; the skill repo itself does not contain it), and `mcp_servers.marketplace.args` points there):
 
 ```bash
 VENV=${WB_SKILL_ENV:-$HOME/.hermes/tools/wb-skill-env/bin/python}   # setup.sh creates it; MCP venv also works

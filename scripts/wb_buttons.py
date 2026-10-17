@@ -10,8 +10,8 @@ Messages sent by the bot CAN be deleted (the clarify message cannot — its id i
 exposed to the agent), so this script tracks its own message ids per chat.
 
 Usage:
-    python3 wb_buttons.py send 362122320
-    python3 wb_buttons.py delete 362122320
+    python3 wb_buttons.py send <chat_id>
+    python3 wb_buttons.py delete <chat_id>
 """
 import json
 import os
