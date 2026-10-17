@@ -1,17 +1,19 @@
 diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
-index 888d40e2..402e149b 100644
+index f91f4305..f887e48d 100644
 --- a/gateway/run_inbound.py
 +++ b/gateway/run_inbound.py
-@@ -1307,6 +1307,11 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
+@@ -1239,6 +1239,13 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayPluginInjectionMixin)
              return _paused_notice
  
          _quick_key = self._session_key_for_source(source)
 +        # Origin for the origin-aware clarify timeout (tools.clarify_gateway): the inbound kind of the
 +        # message that raised the question decides whether the voice-style auto-cancel applies
-+        # (voice -> clarify.voice_timeout, default 180s; text -> the configured window).
-+        from tools import clarify_gateway as _clarify_mod
-+        _clarify_mod.record_inbound_kind(_quick_key, event.message_type.value)
-         _reply = await self._hm_pending_reply_intercepts(event, source, _quick_key)
++        # (voice -> clarify.voice_timeout, default 180s; text -> the configured window). Internal
++        # events (system notifications, synthetic continuations) must not overwrite a real origin.
++        if not is_internal:
++            from tools import clarify_gateway as _clarify_mod
++            _clarify_mod.record_inbound_kind(_quick_key, event.message_type.value)
+         _reply = None if is_internal else await self._hm_pending_reply_intercepts(event, source, _quick_key)
          if _reply is not None:
              return _reply
 diff --git a/gateway/run_turn_runner_clarify_delivery.py b/gateway/run_turn_runner_clarify_delivery.py
@@ -30,7 +32,7 @@ index e3bd3f4f..ce3c9813 100644
      late.disarm()
      if late.undeliverable:
 diff --git a/hermes_cli/config.py b/hermes_cli/config.py
-index ca35d36c..12503a79 100644
+index 9a13eb83..ce305fa9 100644
 --- a/hermes_cli/config.py
 +++ b/hermes_cli/config.py
 @@ -960,6 +960,10 @@ _EXTRA_KNOWN_ROOT_KEYS = {
@@ -110,10 +112,10 @@ index 00000000..2a870a92
 +    # An explicit 0 stays verbatim (unlimited) for text origin.
 +    assert cm.resolve_clarify_timeout({"clarify": {"timeout": 0}}, "text") == 0
 diff --git a/tools/clarify_gateway.py b/tools/clarify_gateway.py
-index c97a4431..d69271e8 100644
+index 4b0b610f..9e97ee66 100644
 --- a/tools/clarify_gateway.py
 +++ b/tools/clarify_gateway.py
-@@ -260,10 +260,41 @@ def clear_session(session_key: str) -> int:
+@@ -270,10 +270,41 @@ def clear_session(session_key: str) -> int:
      return cancelled
  
  
@@ -157,7 +159,7 @@ index c97a4431..d69271e8 100644
      raw = (config.get("clarify") or {}).get("timeout")
      if raw is None:
          raw = (config.get("agent") or {}).get("clarify_timeout", 3600)
-@@ -273,16 +304,17 @@ def resolve_clarify_timeout(config: dict) -> int:
+@@ -283,16 +314,17 @@ def resolve_clarify_timeout(config: dict) -> int:
          return 3600
  
  
