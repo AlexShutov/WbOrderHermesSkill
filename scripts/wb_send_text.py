@@ -41,6 +41,9 @@ def send(chat_id, text, parse_mode=None):
 
 
 def main():
+    if len(sys.argv) < 3:
+        print("usage: wb_send_text.py <chat_id> <text-file>", file=sys.stderr)
+        sys.exit(2)
     chat_id, path = sys.argv[1], sys.argv[2]
     text = open(path, encoding="utf-8").read().strip()
     r = send(chat_id, text, parse_mode="Markdown")

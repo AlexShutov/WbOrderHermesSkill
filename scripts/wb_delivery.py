@@ -46,4 +46,7 @@ async def main(nms):
 
 
 if __name__ == "__main__":
+    if not sys.argv[1:]:
+        print("usage: wb_delivery.py <nmId> [nmId...]", file=sys.stderr)
+        sys.exit(2)
     asyncio.run(main([int(a) for a in sys.argv[1:]]))

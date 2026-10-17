@@ -4,7 +4,7 @@ description: "Use when ordering on a marketplace: only the selected item."
 version: 1.1.0
 author: Hermes Agent
 license: MIT
-platforms: [linux, macos, windows]
+platforms: [macos]
 metadata:
   hermes:
     tags: [Marketplace, Order, Browser, CDP, Cookies]
