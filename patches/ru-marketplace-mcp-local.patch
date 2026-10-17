@@ -1,0 +1,484 @@
+diff --git a/packages/wb-connector/src/wb_connector/internal_api.py b/packages/wb-connector/src/wb_connector/internal_api.py
+new file mode 100644
+index 0000000..544c0c0
+--- /dev/null
++++ b/packages/wb-connector/src/wb_connector/internal_api.py
+@@ -0,0 +1,253 @@
++"""__internal API tier for Wildberries (added 2026-10-17).
++
++WB moved catalog data behind its wbaas WAF in Oct 2026: card.wb.ru and
++search.wb.ru answer 403 to every non-browser client regardless of headers,
++cookies or TLS fingerprint (curl_cffi chrome impersonation included). The SPA
++itself switched to same-origin ``www.wildberries.ru/__internal/...`` endpoints
++which check:
++
++* cookies ``x_wbaas_token`` + ``_wbauid`` — issued by the antibot JS challenge
++  (the 🐴 interstitial; a plain headless Chromium is detected via
++  ``navigator.webdriver`` + the ``HeadlessChrome`` UA token and never passes,
++  masking both makes the challenge solve);
++* SPA headers: ``deviceid``, ``x-queryid``, ``x-requested-with``,
++  ``x-spa-version``, ``x-userid``.
++
++Replayed over plain HTTP (httpx) those pass, so this tier keeps a small cookie
++jar on disk and refreshes it through a masked headless Chrome when it goes
++stale.
++
++Endpoints (verified live 2026-10-17):
++* ``/__internal/u-search/exactmatch/ru/common/v18/search`` -> ``{products[100], total}``
++* ``/__internal/u-card/cards/v4/detail?nm=<one id>`` -> ``{products[]}``
++  (batching ids with ``;`` is rejected with the 498 challenge page — fetch one
++  id at a time).
++
++Product objects are the same v4 shape the legacy card.wb.ru returned, so the
++existing ``_card_item_dict`` mapping works unchanged.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import json
++import os
++import time
++import urllib.parse
++import uuid
++from pathlib import Path
++from typing import Any
++
++import httpx
++from mcp_core.logging import log_event
++
++BASE = "https://www.wildberries.ru"
++SEARCH_PATH = "/__internal/u-search/exactmatch/ru/common/v18/search"
++CARD_PATH = "/__internal/u-card/cards/v4/detail"
++
++# dest the SPA uses for Moscow (positive form; the legacy negative id also
++# works — verified — but match the SPA to stay on the beaten path).
++DEST_SPA = "1259570991"
++
++STATE_PATH = Path(
++    os.environ.get(
++        "WB_INTERNAL_STATE",
++        str(Path.home() / ".marketplace-mcp" / "wb_internal_state.json"),
++    )
++)
++
++_LOCK = asyncio.Lock()
++_state: dict[str, Any] | None = None
++
++
++class WbInternalStale(Exception):
++    """Cookies are missing/expired — the caller should refresh and retry."""
++
++
++def _load_state() -> dict[str, Any]:
++    global _state
++    if _state is None:
++        try:
++            _state = json.loads(STATE_PATH.read_text())
++        except Exception:
++            _state = {}
++        if "deviceid" not in _state:
++            _state["deviceid"] = "site_" + uuid.uuid4().hex
++    return _state
++
++
++def _save_state() -> None:
++    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
++    STATE_PATH.write_text(json.dumps(_load_state(), ensure_ascii=False, indent=1))
++    try:
++        STATE_PATH.chmod(0o600)  # cookies are credentials
++    except Exception:
++        pass
++
++
++def _cookie_header(state: dict[str, Any]) -> str:
++    return "; ".join(
++        f"{k}={v}" for k, v in state.get("cookies", {}).items() if v
++    )
++
++
++def _headers(referer: str) -> dict[str, str]:
++    state = _load_state()
++    return {
++        "User-Agent": (
++            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
++            "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
++        ),
++        "Accept": "application/json, text/plain, */*",
++        "Accept-Language": "ru-RU,ru;q=0.9",
++        "Referer": referer,
++        "Origin": "https://www.wildberries.ru",
++        "deviceid": state["deviceid"],
++        "x-queryid": f"qid{int(time.time() * 1000)}{uuid.uuid4().int % 1000000}",
++        "x-requested-with": "XMLHttpRequest",
++        "x-spa-version": "14.28.4",
++        "x-userid": "0",
++        "Cookie": _cookie_header(state),
++    }
++
++
++async def _get_json(path: str, params: dict[str, str], referer: str) -> dict[str, Any]:
++    """One GET; raises WbInternalStale on 403/498, ValueError on bad JSON."""
++    url = f"{BASE}{path}"
++    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
++        r = await client.get(url, params=params, headers=_headers(referer))
++    if r.status_code in (403, 498):
++        raise WbInternalStale(f"HTTP {r.status_code}")
++    r.raise_for_status()
++    data = r.json()
++    if not isinstance(data, dict):
++        raise ValueError("non-object response")
++    return data
++
++
++async def u_search(query: str, page: int = 1, dest: str = DEST_SPA) -> tuple[list[dict], int | None]:
++    """Text search via the SPA endpoint. Returns (products, total)."""
++    params = {
++        "appType": "1",
++        "curr": "rub",
++        "dest": dest,
++        "query": query,
++        "resultset": "catalog",
++        "sort": "popular",
++        "spp": "30",
++        "lang": "ru",
++        "locale": "ru",
++        "page": str(page),
++    }
++    referer = f"{BASE}/catalog/0/search.aspx?search={urllib.parse.quote(query)}"
++    data = await _get_json(SEARCH_PATH, params, referer)
++    products = data.get("products")
++    if not isinstance(products, list):
++        raise ValueError("no products array")
++    total = data.get("total")
++    return [p for p in products if isinstance(p, dict)], total if isinstance(total, int) else None
++
++
++async def u_card(nm_ids: list[int], dest: str = DEST_SPA) -> list[dict]:
++    """Card details, one nm per request (`;`-batches get the 498 page)."""
++    out: list[dict] = []
++    for nm in nm_ids:
++        params = {
++            "appType": "1",
++            "curr": "rub",
++            "dest": dest,
++            "spp": "30",
++            "hide_vflags": "4294967296",
++            "mtype": "257",
++            "lang": "ru",
++            "ab_testing": "false",
++            "nm": str(nm),
++        }
++        data = await _get_json(CARD_PATH, params, f"{BASE}/catalog/{nm}/detail.aspx")
++        for p in data.get("products") or []:
++            if isinstance(p, dict):
++                out.append(p)
++        await asyncio.sleep(0.3)  # be polite to the same-origin gateway
++    return out
++
++
++async def refresh_cookies() -> bool:
++    """Pass the wbaas challenge in a masked headless Chrome; save cookies.
++
++    Masking: UA without the ``HeadlessChrome`` token +
++    ``navigator.webdriver -> false`` injected before any site script. Both are
++    required — with either one present the challenge loops forever (verified
++    2026-10-17). Uses the system Chrome via channel="chrome" (playwright's
++    bundled chromium is not installed in this venv).
++    """
++    from playwright.async_api import async_playwright
++
++    async with async_playwright() as p:
++        browser = await p.chromium.launch(
++            channel="chrome",
++            headless=os.environ.get("WB_HEADLESS", "1") != "0",
++        )
++        try:
++            ctx = await browser.new_context(
++                user_agent=(
++                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
++                    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
++                ),
++                locale="ru-RU",
++            )
++            await ctx.add_init_script(
++                'Object.defineProperty(Navigator.prototype, "webdriver", '
++                "{get: () => false, configurable: true});"
++            )
++            page = await ctx.new_page()
++            for attempt in range(2):
++                try:
++                    await page.goto(BASE + "/", wait_until="domcontentloaded")
++                    break
++                except Exception as exc:  # transient net::ERR_* on the tunnel
++                    if attempt == 1:
++                        raise
++                    log_event("wb_internal.refresh_retry", error=str(exc)[:150])
++                    await page.wait_for_timeout(3000)
++            deadline = time.monotonic() + 60
++            ok = False
++            while time.monotonic() < deadline:
++                title = await page.title()
++                cookies = {c["name"]: c["value"] for c in await ctx.cookies(BASE + "/")}
++                if "x_wbaas_token" in cookies and "🐴" not in title and len(title) > 3:
++                    ok = True
++                    break
++                await page.wait_for_timeout(3000)
++            if not ok:
++                # last chance: cookies with the site title still showing the
++                # horse prefix are fine — the SPA does not always clean it.
++                cookies = {c["name"]: c["value"] for c in await ctx.cookies(BASE + "/")}
++                ok = "x_wbaas_token" in cookies and len(cookies.get("x_wbaas_token", "")) > 50
++            if ok:
++                state = _load_state()
++                state["cookies"] = cookies
++                state["refreshed_at"] = time.time()
++                _save_state()
++            return ok
++        finally:
++            await browser.close()
++
++
++async def _with_refresh(fn, *args, **kwargs):
++    """Run fn; on stale cookies refresh once and retry once."""
++    try:
++        return await fn(*args, **kwargs)
++    except WbInternalStale:
++        async with _LOCK:
++            ok = await refresh_cookies()
++        if not ok:
++            raise
++        return await fn(*args, **kwargs)
++
++
++async def search(query: str, page: int = 1, dest: str = DEST_SPA):
++    return await _with_refresh(u_search, query, page, dest)
++
++
++async def card(nm_ids: list[int], dest: str = DEST_SPA):
++    return await _with_refresh(u_card, nm_ids, dest)
+diff --git a/packages/wb-connector/src/wb_connector/server.py b/packages/wb-connector/src/wb_connector/server.py
+index f871169..41571a4 100644
+--- a/packages/wb-connector/src/wb_connector/server.py
++++ b/packages/wb-connector/src/wb_connector/server.py
+@@ -57,6 +57,7 @@ from mcp_core.redact import redact_error_text as _redact
+ from mcp_core.transport import get_text_budgeted, proxy_from_env
+ from pydantic import Field
+ 
++from wb_connector import internal_api
+ from wb_connector.models_output import (
+     MetaOut,
+     WbCardItem,
+@@ -590,6 +591,7 @@ async def wb_card(
+     if ctx:
+         await ctx.debug(f"wb_card: {len(nm_ids)} nm_ids dest={dest}")
+     await _polite_wait()
++    internal_tier = False
+ 
+     try:
+         try:
+@@ -604,16 +606,32 @@ async def wb_card(
+             if text and "<html" in text[:200].lower():
+                 log_event("wb_card.blocked", reason="cloudflare_html")
+                 raise_tool_error(TransportDownError("Cloudflare HTML page (likely missing dest param)", provider="wb"))
+-            if status_code != 200:
++            data = None
++            internal_tier = False
++            if status_code == 403:
++                # Oct 2026: card.wb.ru is wbaas-gated for every non-browser
++                # client (headers/cookies/TLS fingerprint do not matter). The
++                # same-origin __internal tier serves the same v4 product shape.
++                try:
++                    internal_products = await internal_api.card(list(nm_ids))
++                except Exception as exc:
++                    log_event("wb_card.internal_tier_failed", error=_redact(str(exc)))
++                    internal_products = []
++                if internal_products:
++                    data = {"products": internal_products}
++                    internal_tier = True
++                    log_event("wb_card.internal_tier_ok", items=len(internal_products))
++            if data is None and status_code != 200:
+                 log_event("wb_card.http_error", status=status_code)
+                 raise_tool_error(
+                     TransportDownError(f"wb_card HTTP {status_code}", provider="wb", status_code=status_code)
+                 )
+-            try:
+-                data = json.loads(text or "")
+-            except json.JSONDecodeError as exc:
+-                log_event("wb_card.parse_error", error=_redact(str(exc)))
+-                raise_tool_error(ParserDriftError(str(exc), provider="wb"))
++            if data is None:
++                try:
++                    data = json.loads(text or "")
++                except json.JSONDecodeError as exc:
++                    log_event("wb_card.parse_error", error=_redact(str(exc)))
++                    raise_tool_error(ParserDriftError(str(exc), provider="wb"))
+         except httpx.HTTPError as exc:
+             log_event("wb_card.network_error", error=_redact(str(exc)), exc_type=type(exc).__name__)
+             raise_tool_error(TransportDownError(str(exc), provider="wb"))
+@@ -634,6 +652,11 @@ async def wb_card(
+                 continue  # non-object product entry must not crash (audit wave-2)
+             item_dicts.append(_card_item_dict(p))
+         warnings = _aggregate_offer_warnings(item_dicts)
++        if internal_tier:
++            warnings.append(
++                "internal tier: card.wb.ru is wbaas-gated, data came from the SPA "
++                "__internal endpoint (wbaas cookie jar)"
++            )
+         log_event("wb_card.done", nm_count=len(nm_ids), items=len(item_dicts))
+         return WbCardResponse(
+             dest=dest,
+@@ -1350,11 +1373,22 @@ async def wb_search(
+             v9_error = f"{type(exc).__name__}: {exc}"
+ 
+         fallback_used = False
++        internal_used = False
+         if not products:
++            log_event("wb_search.v9_unavailable", error=_redact(v9_error or "empty result"))
++            # Oct 2026: search.wb.ru v9 is wbaas-gated for non-browser clients;
++            # the SPA's same-origin endpoint answers with the same product shape.
++            try:
++                products, total_found = await internal_api.search(query, page)
++                internal_used = bool(products)
++                if internal_used:
++                    log_event("wb_search.internal_tier_ok", items=len(products))
++            except Exception as exc:
++                log_event("wb_search.internal_tier_failed", error=_redact(str(exc)))
++        if not products and not internal_used:
+             # FALLBACK: the legacy two-step path. Its ids skew stale, but a stale
+             # result beats no result when v9 is unavailable, and the response is
+             # flagged so the caller knows which path produced it.
+-            log_event("wb_search.v9_unavailable", error=_redact(v9_error or "empty result"))
+             fallback_used = True
+             products, total_found = await _search_via_search_goods(query, dest, page, ctx)
+ 
+@@ -1382,6 +1416,11 @@ async def wb_search(
+             item_dicts.append(_card_item_dict(p))
+ 
+         warnings = _aggregate_offer_warnings(item_dicts)
++        if internal_used:
++            warnings.append(
++                "internal tier: v9 search is wbaas-gated, results came from the SPA "
++                "__internal endpoint (wbaas cookie jar)"
++            )
+         if fallback_used:
+             warnings.append(
+                 "fallback: v9 search was unavailable, results came from the legacy id path "
+diff --git a/packages/wb-connector/tests/test_helpers.py b/packages/wb-connector/tests/test_helpers.py
+index 12b449b..4af46f6 100644
+--- a/packages/wb-connector/tests/test_helpers.py
++++ b/packages/wb-connector/tests/test_helpers.py
+@@ -17,6 +17,25 @@ def _tool_error_payload(excinfo) -> dict:
+     return json.loads(str(excinfo.value))
+ 
+ 
++def _stub_internal_tier(monkeypatch, products=None):
++    """The internal (wbaas) tier is network + cookie-jar bound: stub it.
++
++    Default stub answers nothing, so tests that exercise the legacy path still
++    reach it. Pass a product list to make the internal tier win.
++    """
++    from wb_connector import internal_api
++
++    async def fake_search(query, page=1, dest=None):
++        return (products or []), (len(products) if products else None)
++
++    async def fake_card(nm_ids, dest=None):
++        return products or []
++
++    monkeypatch.setattr(internal_api, "search", fake_search)
++    monkeypatch.setattr(internal_api, "card", fake_card)
++    return internal_api
++
++
+ def test_server_version_matches_pyproject():
+     pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+     assert pyproject["project"]["version"] == server.SERVER_VERSION
+@@ -507,6 +526,7 @@ def test_wb_search_reads_products_straight_from_v9(monkeypatch):
+ 
+ def test_wb_search_falls_back_to_legacy_path_when_v9_fails(monkeypatch):
+     """A stale result beats no result — but the caller must be told."""
++    _stub_internal_tier(monkeypatch)
+     calls = []
+ 
+     async def fake_safe_get_text(client, url):
+@@ -598,6 +618,7 @@ def test_wb_search_returns_no_results_when_both_paths_are_empty(monkeypatch):
+     v9 answering with an empty product list and the fallback yielding no usable
+     ids is a legitimate no-results answer, not a broken parser.
+     """
++    _stub_internal_tier(monkeypatch)
+ 
+     async def fake_safe_get_text(client, url):
+         if "v9/search" in url:
+@@ -618,6 +639,8 @@ def test_wb_search_returns_no_results_when_both_paths_are_empty(monkeypatch):
+ 
+ 
+ def test_wb_search_empty_ids_returns_no_results_not_error(monkeypatch):
++    _stub_internal_tier(monkeypatch)
++
+     async def fake_safe_get_text(client, url):
+         return 200, json.dumps([]), None
+ 
+@@ -717,6 +740,7 @@ def test_wb_selfcheck_reviews_uses_feedbacks_fallback_host(monkeypatch):
+ 
+ def test_wb_search_handles_v9_shape_drift_by_falling_back(monkeypatch):
+     """If v9's response shape moves, the legacy path still answers."""
++    _stub_internal_tier(monkeypatch)
+     calls = []
+ 
+     async def fake_safe_get_text(client, url):
+@@ -745,6 +769,54 @@ def test_wb_search_handles_v9_shape_drift_by_falling_back(monkeypatch):
+     asyncio.run(scenario())
+ 
+ 
++def test_wb_search_internal_tier_answers_when_v9_is_gated(monkeypatch):
++    """Oct 2026: v9 is wbaas-gated for non-browser clients; the SPA tier answers."""
++    _stub_internal_tier(
++        monkeypatch,
++        products=[{"id": 123, "name": "x", "brand": "b", "sizes": [], "totalQuantity": 0}],
++    )
++
++    async def fake_safe_get_text(client, url):
++        return 403, "", None
++
++    async def no_wait():
++        return None
++
++    async def scenario():
++        monkeypatch.setattr(server, "_safe_get_text", fake_safe_get_text)
++        monkeypatch.setattr(server, "_polite_wait", no_wait)
++        result = await server.wb_search("x")
++        data = result.model_dump()
++        assert data["count"] == 1
++        assert any("internal tier" in w for w in data["meta"]["warnings"])
++
++    asyncio.run(scenario())
++
++
++def test_wb_card_internal_tier_when_legacy_host_is_gated(monkeypatch):
++    """card.wb.ru 403 must not fail the tool while the SPA tier still answers."""
++    _stub_internal_tier(
++        monkeypatch,
++        products=[{"id": 123, "name": "x", "brand": "b", "sizes": [], "totalQuantity": 0}],
++    )
++
++    async def fake_safe_get_text(client, url):
++        return 403, "", None
++
++    async def no_wait():
++        return None
++
++    async def scenario():
++        monkeypatch.setattr(server, "_safe_get_text", fake_safe_get_text)
++        monkeypatch.setattr(server, "_polite_wait", no_wait)
++        result = await server.wb_card([123])
++        data = result.model_dump()
++        assert data["count"] == 1
++        assert any("internal tier" in w for w in data["meta"]["warnings"])
++
++    asyncio.run(scenario())
++
++
+ def test_wb_search_string_zero_quantity_is_not_in_stock(monkeypatch):
+     async def fake_safe_get_text(client, url):
+         if "search-goods" in url:
