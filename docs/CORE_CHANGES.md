@@ -59,13 +59,14 @@ cd <репозиторий hermes-agent> && python3 -m pytest \
 
 ## Машино-зависимые части (НЕ входят в патч и репозиторий)
 
-- `ru-marketplace-mcp/` — локальный MCP-сервер поиска ВБ (опционален: без него нет
+- `ru-marketplace-mcp/` — MCP-сервер поиска ВБ (опционален: без него нет
   поиска, но заказ по nmId работает); его venv больше не нужен скриптам —
-  `scripts/setup.sh` создаёт отдельное окружение с playwright. Проект — клон
-  стороннего `fosteev/ru-marketplace-mcp` с нашими локальными доработками
-  (internal tier / SPA __internal fallback, коммит `0cb86ff`); push в апстрим не
-  делался. Доработка сохранена как `patches/ru-marketplace-mcp-local.patch` —
-  на новой машине: клонировать апстрим и `git apply` этого патча;
+  `scripts/setup.sh` создаёт отдельное окружение с playwright. Это форк
+  **https://github.com/AlexShutov/ru-marketplace-mcp** (ветка `main`, коммит
+  `0cb86ff`) с нашей доработкой internal tier / SPA `__internal` fallback;
+  upstream (`fosteev/ru-marketplace-mcp`) не патчится. На новой машине:
+  `git clone https://github.com/AlexShutov/ru-marketplace-mcp` — патч уже в нём.
+  Оффлайн-копия доработки: `patches/ru-marketplace-mcp-local.patch`;
 - `~/.marketplace-mcp/` — профиль отладочного Chrome и cookie-jar;
 - `TELEGRAM_BOT_TOKEN` в `~/.hermes/.env` — для `wb_buttons.py` / `wb_send_text.py`
   (на любой машине с настроенным Telegram он уже есть);
