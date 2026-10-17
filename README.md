@@ -33,7 +33,7 @@ hermes skills list                                                # провер
 для поиска — MCP-сервер marketplace (опционально; заказ по nmId работает и без него):
 
 ```bash
-git clone https://github.com/AlexShutov/ru-marketplace-mcp-wixed-wb-purchase \
+git clone https://github.com/AlexShutov/ru-marketplace-mcp-fixed-wb-purchase \
   ~/.hermes/skills/marketplace-order-flow/ru-marketplace-mcp   # форк с internal-tier доработкой
 cd ~/.hermes/skills/marketplace-order-flow/ru-marketplace-mcp && uv sync --all-packages
 ```

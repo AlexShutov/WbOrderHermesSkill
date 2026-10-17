@@ -62,10 +62,10 @@ cd <репозиторий hermes-agent> && python3 -m pytest \
 - `ru-marketplace-mcp/` — MCP-сервер поиска ВБ (опционален: без него нет
   поиска, но заказ по nmId работает); его venv больше не нужен скриптам —
   `scripts/setup.sh` создаёт отдельное окружение с playwright. Это форк
-  **https://github.com/AlexShutov/ru-marketplace-mcp-wixed-wb-purchase** (ветка `main`, коммит
+  **https://github.com/AlexShutov/ru-marketplace-mcp-fixed-wb-purchase** (ветка `main`, коммит
   `0cb86ff`) с нашей доработкой internal tier / SPA `__internal` fallback;
   upstream (`fosteev/ru-marketplace-mcp`) не патчится. На новой машине:
-  `git clone https://github.com/AlexShutov/ru-marketplace-mcp-wixed-wb-purchase` — патч уже в нём.
+  `git clone https://github.com/AlexShutov/ru-marketplace-mcp-fixed-wb-purchase` — патч уже в нём.
   Оффлайн-копия доработки: `patches/ru-marketplace-mcp-local.patch`;
 - `~/.marketplace-mcp/` — профиль отладочного Chrome и cookie-jar;
 - `TELEGRAM_BOT_TOKEN` в `~/.hermes/.env` — для `wb_buttons.py` / `wb_send_text.py`
