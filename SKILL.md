@@ -8,7 +8,6 @@ platforms: [macos]
 metadata:
   hermes:
     tags: [Marketplace, Order, Browser, CDP, Cookies]
-    related_skills: [blocked-page-recovery]
 ---
 
 # Marketplace order flow
